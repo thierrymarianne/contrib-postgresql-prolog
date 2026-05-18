@@ -9,6 +9,9 @@ test-scram: psql-up
 	DATABASE_DB_NAME=postgres \
 	scryer-prolog ./scram_test.pl -g 'run_test'
 
+test-scram: psql-up
+	scryer-prolog ./scram_test.pl -g 'run_test'
+
 psql-up:
 	docker-compose up -d postgres postgres-scram
 
