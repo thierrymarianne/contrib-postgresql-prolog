@@ -19,6 +19,21 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
+      postgres-scram:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+          POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5433:5432
     steps:
       - name: Install Rust cargo
         uses: actions-rs/toolchain@v1
@@ -43,4 +58,12 @@ jobs:
         with:
           logtalk-version: 3.70.0
       - name: Execute tests
-        run: logtalk_tester -p scryer
+        run: logtalk_tester -p scryer -o verbose
+      - name: Execute SCRAM-SHA-256 round-trip test
+        env:
+          DATABASE_HOST: 127.0.0.1
+          DATABASE_PORT: 5433
+          DATABASE_USERNAME: postgres
+          DATABASE_PASSWORD: postgres
+          DATABASE_DB_NAME: postgres
+        run: scryer-prolog ./scram_test.pl -g 'run_test'
