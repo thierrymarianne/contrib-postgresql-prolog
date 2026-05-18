@@ -19,7 +19,7 @@ env_or_default(Name, Default, Value) :-
 % setup error.
 run_test :-
     env_or_default("DATABASE_HOST",     "127.0.0.1", Host),
-    env_or_default("DATABASE_PORT",     "5432",      PortChars),
+    env_or_default("DATABASE_PORT",     "5433",      PortChars),
     number_chars(Port, PortChars),
     env_or_default("DATABASE_USERNAME", "postgres",  User),
     env_or_default("DATABASE_PASSWORD", "postgres",  Pass),
