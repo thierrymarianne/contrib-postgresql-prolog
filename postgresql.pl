@@ -6,20 +6,39 @@
 
 
 :- use_module('messages').
+:- use_module('scram', [do_scram_sha_256_after_offer/3]).
 :- use_module('sql_query').
 :- use_module('types').
 
 connect(User, Password, Host, Port, Database, postgresql(Stream)) :-
-    socket_client_open(Host:Port, Stream, [type(binary)]),
+    (   atom(Host)
+    ->  HostAtom = Host
+    ;   atom_chars(HostAtom, Host) ),
+    socket_client_open(HostAtom:Port, Stream, [type(binary)]),
     startup_message(User, Database, BytesStartup),
     put_bytes(Stream, BytesStartup),
+    do_authenticate(Stream, User, Password),
+    flush_bytes(Stream).
+
+% Dispatch on the server's AuthenticationRequest method.
+do_authenticate(Stream, User, Password) :-
     get_bytes(Stream, BytesAuth),
-    auth_message(password, BytesAuth),
+    auth_method(BytesAuth, Method),
+    handle_auth(Method, Stream, User, Password).
+
+handle_auth(ok, _, _, _).
+handle_auth(password, Stream, _, Password) :-
     password_message(Password, BytesPassword),
     put_bytes(Stream, BytesPassword),
     get_bytes(Stream, BytesOk),
-    auth_ok_message(BytesOk),
-    flush_bytes(Stream).
+    auth_ok_message(BytesOk).
+handle_auth(sasl(Mechanisms), Stream, User, Password) :-
+    (   member("SCRAM-SHA-256", Mechanisms)
+    ->  do_scram_sha_256_after_offer(Stream, User, Password),
+        get_bytes(Stream, BytesOk),
+        auth_ok_message(BytesOk)
+    ;   throw(unsupported_sasl_mechanisms(Mechanisms))
+    ).
 
 flush_bytes(Stream) :-
     get_bytes(Stream, Bytes),
