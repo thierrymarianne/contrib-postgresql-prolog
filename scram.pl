@@ -43,6 +43,36 @@ implemented locally on top of `hmac_sha256/3`.
 % We use gs2-cbind-flag = "n" (no channel binding) and omit authzid,
 % so gs2-header = "n,," and channel-binding base64 = "biws".
 % Each rule below mirrors one ABNF production.
+
+client_first_message(User, Nonce) -->
+    gs2_header,
+    client_first_message_bare(User, Nonce).
+
+gs2_header --> "n,,".
+
+client_first_message_bare(User, Nonce) -->
+    username(User), ",", nonce(Nonce).
+
+username(SaslName) --> "n=", seq(SaslName).
+nonce(Printable)   --> "r=", seq(Printable).
+
+channel_binding --> "c=biws".
+
+client_final_message_without_proof(Nonce) -->
+    channel_binding, ",", nonce(Nonce).
+
+proof(Base64) --> "p=", seq(Base64).
+
+client_final_message(Nonce, Base64Proof) -->
+    client_final_message_without_proof(Nonce), ",", proof(Base64Proof).
+
+% AuthMessage = client-first-message-bare "," server-first-message ","
+%               client-final-message-without-proof
+auth_message(User, ClientNonce, ServerFirst, CombinedNonce) -->
+    client_first_message_bare(User, ClientNonce), ",",
+    seq(ServerFirst), ",",
+    client_final_message_without_proof(CombinedNonce).
+
 %% do_scram_sha_256_after_offer(+Stream, +User, +Password)
 %
 % Performs SCRAM-SHA-256 SASL authentication on a PostgreSQL wire-protocol
@@ -75,10 +105,7 @@ implemented locally on top of `hmac_sha256/3`.
 do_scram_sha_256_after_offer(Stream, User, Password) :-
     % --- client-first-message ---
     client_nonce_chars(ClientNonce),
-    append("n=", User, NUser0),
-    append(NUser0, ",r=", NUser1),
-    append(NUser1, ClientNonce, ClientFirstBare),
-    append("n,,", ClientFirstBare, ClientFirst),
+    phrase(client_first_message(User, ClientNonce), ClientFirst),
 
     sasl_initial_response_message("SCRAM-SHA-256", ClientFirst, InitBytes),
     put_bytes(Stream, InitBytes),
@@ -101,17 +128,9 @@ do_scram_sha_256_after_offer(Stream, User, Password) :-
     hmac_sha256(SaltedPassword, "Client Key", ClientKey),
     sha256_bytes(ClientKey, StoredKey),
 
-    % gs2-header "n,," in base64 is "biws"
-    GS2HeaderB64 = "biws",
-    append("c=", GS2HeaderB64, CHead),
-    append(CHead, ",r=", CHead1),
-    append(CHead1, ServerNonce, ClientFinalWithoutProof),
-
-    % AuthMessage = client-first-bare + "," + server-first + "," + client-final-without-proof
-    append(ClientFirstBare, ",", AM0),
-    append(AM0, ServerFirst, AM1),
-    append(AM1, ",", AM2),
-    append(AM2, ClientFinalWithoutProof, AuthMessageChars),
+    % AuthMessage = client-first-message-bare "," server-first-message ","
+    %               client-final-message-without-proof  (RFC 5802 §3)
+    phrase(auth_message(User, ClientNonce, ServerFirst, ServerNonce), AuthMessageChars),
 
     hmac_sha256(StoredKey, AuthMessageChars, ClientSignature),
     bytes_xor(ClientKey, ClientSignature, ClientProof),
@@ -119,8 +138,7 @@ do_scram_sha_256_after_offer(Stream, User, Password) :-
     bytes_to_chars(ClientProof, ClientProofChars),
     chars_base64(ClientProofChars, ClientProofB64, []),
 
-    append(ClientFinalWithoutProof, ",p=", CF0),
-    append(CF0, ClientProofB64, ClientFinal),
+    phrase(client_final_message(ServerNonce, ClientProofB64), ClientFinal),
 
     sasl_response_message(ClientFinal, FinalBytes),
     put_bytes(Stream, FinalBytes),
