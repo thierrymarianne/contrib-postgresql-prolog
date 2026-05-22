@@ -56,6 +56,11 @@ jobs:
       - name: Install Scryer Prolog
         run: sudo install -m 0755 scryer-bin/scryer-prolog /usr/bin/scryer-prolog
 
+      - name: First-argument indexing regression (Scryer v0.10.0 - must pass)
+        # Companion check for the workaround in types.pl:11-13.
+        # The bug demonstrated on v0.9.4 lives in the test-logtalk job.
+        run: scryer-prolog tests/indexing_regression.pl
+
       - name: Execute SCRAM-SHA-256 round-trip test
         env:
           DATABASE_HOST: 127.0.0.1

@@ -61,6 +61,14 @@ jobs:
       - name: Install Scryer Prolog
         run: sudo install -m 0755 scryer-bin/scryer-prolog /usr/bin/scryer-prolog
 
+      - name: First-argument indexing regression (Scryer v0.9.4 - demonstration; allowed to fail)
+        # Demonstrates the bug worked around in types.pl:11-13. The step is
+        # expected to fail on v0.9.4 (shift_* probes return solutions=[]);
+        # continue-on-error keeps the job green. The v0.10.0 counterpart in
+        # the test job asserts the regression is fixed upstream.
+        continue-on-error: true
+        run: scryer-prolog tests/indexing_regression.pl
+
       - name: Install Logtalk ${{ env.LOGTALK_VERSION }}
         # Inlined to avoid logtalk-actions/setup-logtalk's node16 runtime.
         # Equivalent to: logtalk-actions/setup-logtalk with logtalk-version: ${LOGTALK_VERSION}.
