@@ -7,14 +7,14 @@
 :- use_module(library(dcgs)).
 :- use_module(library(reif)).
 
-:- use_module('messages', [
+:- use_module(messages, [
     auth_method/2,
     sasl_initial_response_message/3,
     sasl_response_message/2
 ]).
 
 % Reads bytes from Stream the same way postgresql.pl get_bytes/2 does.
-:- use_module('types', [int32/2]).
+:- use_module(types, [int32/2]).
 
 % scram_sha_256_authenticate(+Stream, +User, +Password)
 %
