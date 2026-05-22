@@ -20,21 +20,42 @@ jobs:
           --health-retries 5
         ports:
           - 5433:5432
+    env:
+      SCRYER_VERSION: v0.10.0
     steps:
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Checkout Scryer Prolog
+
+      - name: Cache scryer-prolog ${{ env.SCRYER_VERSION }} binary
+        id: cache-scryer
+        uses: actions/cache@v5
+        with:
+          path: scryer-bin/scryer-prolog
+          key: scryer-prolog-${{ env.SCRYER_VERSION }}-${{ runner.os }}-v1
+
+      - name: Install Rust toolchain
+        if: steps.cache-scryer.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Checkout Scryer Prolog ${{ env.SCRYER_VERSION }}
+        if: steps.cache-scryer.outputs.cache-hit != 'true'
         uses: actions/checkout@v6
         with:
           repository: mthom/scryer-prolog
+          ref: ${{ env.SCRYER_VERSION }}
           path: scryer-prolog
-      - name: Compile Scryer Prolog
-        run: cargo build --release
+
+      - name: Compile Scryer Prolog ${{ env.SCRYER_VERSION }}
+        if: steps.cache-scryer.outputs.cache-hit != 'true'
         working-directory: scryer-prolog
+        run: |
+          cargo build --release
+          mkdir -p "$GITHUB_WORKSPACE/scryer-bin"
+          cp target/release/scryer-prolog "$GITHUB_WORKSPACE/scryer-bin/scryer-prolog"
+
       - name: Install Scryer Prolog
-        run: sudo cp scryer-prolog/target/release/scryer-prolog /usr/bin/scryer-prolog
+        run: sudo install -m 0755 scryer-bin/scryer-prolog /usr/bin/scryer-prolog
+
       - name: Execute SCRAM-SHA-256 round-trip test
         env:
           DATABASE_HOST: 127.0.0.1
