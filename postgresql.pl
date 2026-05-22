@@ -7,7 +7,10 @@
 
 
 :- use_module('messages').
-:- use_module('scram', [do_scram_sha_256_after_offer/3]).
+% SCRAM is loaded lazily inside handle_auth(sasl(_), ...) below.
+% Loading library(crypto) eagerly at file-top makes the Logtalk test suite
+% time out under Scryer 0.9.4 + Logtalk 3.70.0, even though the password-auth
+% tests never exercise the SASL code path.
 :- use_module('sql_query').
 :- use_module('types').
 
@@ -34,8 +37,9 @@ handle_auth(password, Stream, _, Password) :-
     get_bytes(Stream, BytesOk),
     auth_ok_message(BytesOk).
 handle_auth(sasl(Mechanisms), Stream, User, Password) :-
+    use_module(scram),
     if_(memberd_t("SCRAM-SHA-256", Mechanisms),
-        ( do_scram_sha_256_after_offer(Stream, User, Password),
+        ( scram:do_scram_sha_256_after_offer(Stream, User, Password),
           get_bytes(Stream, BytesOk),
           auth_ok_message(BytesOk)
         ),
