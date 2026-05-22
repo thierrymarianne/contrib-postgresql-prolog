@@ -64,7 +64,10 @@ jobs:
       - name: Install Logtalk ${{ env.LOGTALK_VERSION }}
         # Inlined to avoid logtalk-actions/setup-logtalk's node16 runtime.
         # Equivalent to: logtalk-actions/setup-logtalk with logtalk-version: ${LOGTALK_VERSION}.
+        # Extract under $RUNNER_TEMP so logtalk_tester does not pick up the
+        # upstream library/ tester.lgt files and run them all under Scryer.
         run: |
+          cd "$RUNNER_TEMP"
           wget -nv "https://logtalk.org/files/logtalk-${LOGTALK_VERSION}.tar.bz2"
           tar xjf "logtalk-${LOGTALK_VERSION}.tar.bz2"
           sudo "logtalk-${LOGTALK_VERSION}/scripts/install.sh" -p /usr/local
@@ -72,7 +75,9 @@ jobs:
           echo "LOGTALKUSER=$HOME/logtalk" >> "$GITHUB_ENV"
 
       - name: Execute Logtalk tests
-        run: logtalk_tester -p scryer -o verbose
+        # -t 60 bounds each test set so a Scryer hang cannot stall the job near
+        # the GitHub Actions 6h ceiling; -l 1 restricts discovery to this dir.
+        run: logtalk_tester -p scryer -o verbose -l 1 -t 60
 
       - name: Upload Logtalk tester logs on failure
         if: failure()
