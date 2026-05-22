@@ -3,6 +3,7 @@
 :- use_module(library(lists)).
 :- use_module(library(charsio)).
 :- use_module(library(sockets)).
+:- use_module(library(reif)).
 
 
 :- use_module('messages').
@@ -33,11 +34,12 @@ handle_auth(password, Stream, _, Password) :-
     get_bytes(Stream, BytesOk),
     auth_ok_message(BytesOk).
 handle_auth(sasl(Mechanisms), Stream, User, Password) :-
-    (   member("SCRAM-SHA-256", Mechanisms)
-    ->  do_scram_sha_256_after_offer(Stream, User, Password),
-        get_bytes(Stream, BytesOk),
-        auth_ok_message(BytesOk)
-    ;   throw(unsupported_sasl_mechanisms(Mechanisms))
+    if_(memberd_t("SCRAM-SHA-256", Mechanisms),
+        ( do_scram_sha_256_after_offer(Stream, User, Password),
+          get_bytes(Stream, BytesOk),
+          auth_ok_message(BytesOk)
+        ),
+        throw(unsupported_sasl_mechanisms(Mechanisms))
     ).
 
 flush_bytes(Stream) :-

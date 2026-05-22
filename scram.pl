@@ -5,6 +5,7 @@
 :- use_module(library(lists)).
 :- use_module(library(format)).
 :- use_module(library(dcgs)).
+:- use_module(library(reif)).
 
 :- use_module('messages', [
     auth_method/2,
@@ -94,9 +95,10 @@ do_scram_sha_256_after_offer(Stream, User, Password) :-
     hmac_sha256(SaltedPassword, "Server Key", ServerKey),
     hmac_sha256(ServerKey, AuthMessageChars, ExpectedServerSig),
 
-    (   ServerSigBytes == ExpectedServerSig
-    ->  true
-    ;   throw(scram_server_signature_mismatch) ).
+    if_(dif(ServerSigBytes, ExpectedServerSig),
+        throw(scram_server_signature_mismatch),
+        true
+    ).
 
 
 % ---------------------------------------------------------------- helpers
