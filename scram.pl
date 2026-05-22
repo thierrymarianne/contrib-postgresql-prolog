@@ -1,5 +1,28 @@
 :- module(scram, [do_scram_sha_256_after_offer/3]).
 
+/**
+SCRAM-SHA-256 SASL authentication for the PostgreSQL wire protocol.
+
+Implements the client side of the SASL exchange specified by
+[RFC 5802](https://www.rfc-editor.org/rfc/rfc5802) and
+[RFC 7677](https://www.rfc-editor.org/rfc/rfc7677), as carried by
+PostgreSQL's `AuthenticationSASL` / `AuthenticationSASLContinue` /
+`AuthenticationSASLFinal` messages.
+
+The handshake exchanges four SASL messages:
+
+- *client-first* (`SASLInitialResponse`) carrying the client nonce
+- *server-first* (`R(11) AuthenticationSASLContinue`) with the combined
+  nonce, salt and iteration count
+- *client-final* (`SASLResponse`) carrying the client proof
+- *server-final* (`R(12) AuthenticationSASLFinal`) with the server signature
+
+The module uses `gs2-cbind-flag = "n"` (no channel binding) and omits the
+authzid, so the GS2 header is `n,,` and the base64 channel binding is
+`biws`. Cryptographic primitives come from `library(crypto)`; PBKDF2 is
+implemented locally on top of `hmac_sha256/3`.
+*/
+
 :- use_module(library(charsio)).
 :- use_module(library(crypto)).
 :- use_module(library(lists)).
@@ -16,20 +39,39 @@
 % Reads bytes from Stream the same way postgresql.pl get_bytes/2 does.
 :- use_module(types, [int32/2]).
 
-% scram_sha_256_authenticate(+Stream, +User, +Password)
+% ---------- SCRAM message grammar (RFC 5802 §7) ------------------
+% We use gs2-cbind-flag = "n" (no channel binding) and omit authzid,
+% so gs2-header = "n,," and channel-binding base64 = "biws".
+% Each rule below mirrors one ABNF production.
+%% do_scram_sha_256_after_offer(+Stream, +User, +Password)
 %
-% Performs SCRAM-SHA-256 SASL authentication on a Postgres wire-protocol
-% Stream that has just received an R(10) AuthenticationSASL message.
-% Caller is expected to read the next R(0) AuthenticationOk and proceed
-% to ReadyForQuery.
+% Performs SCRAM-SHA-256 SASL authentication on a PostgreSQL wire-protocol
+% `Stream` that has just received an `R(10) AuthenticationSASL` message
+% advertising `SCRAM-SHA-256`.
+%
+% Sends `SASLInitialResponse` with the client-first message, parses the
+% server-first message returned in `R(11)`, derives the salted password via
+% PBKDF2-HMAC-SHA-256, sends the client proof in `SASLResponse`, and finally
+% verifies the server signature returned in `R(12) AuthenticationSASLFinal`.
+%
+% On success the stream is left positioned to read the next
+% `R(0) AuthenticationOk`, after which the caller should proceed to
+% `ReadyForQuery`.
+%
+% Throws:
+%
+% - `scram_invalid_server_nonce` when the combined nonce does not extend the
+%   client nonce
+% - `scram_server_signature_mismatch` when the server signature does not match
+%   the value expected from `ServerKey`
+% - `scram_server_error(Err)` when the server reports an `e=<error>` in the
+%   final message
 %
 % References:
-%   - RFC 5802 (SCRAM)
-%   - RFC 7677 (SCRAM-SHA-256)
-%   - PostgreSQL protocol: SASL Authentication
-% Entry point used when R(10) AuthenticationSASL has already been read
-% and decoded by the dispatcher. We start by sending the client-first
-% SASLInitialResponse and run the rest of the handshake.
+%
+% - [RFC 5802](https://www.rfc-editor.org/rfc/rfc5802) (SCRAM)
+% - [RFC 7677](https://www.rfc-editor.org/rfc/rfc7677) (SCRAM-SHA-256)
+% - PostgreSQL protocol: SASL Authentication
 do_scram_sha_256_after_offer(Stream, User, Password) :-
     % --- client-first-message ---
     client_nonce_chars(ClientNonce),
@@ -103,9 +145,11 @@ do_scram_sha_256_after_offer(Stream, User, Password) :-
 
 % ---------------------------------------------------------------- helpers
 
-% Read a single Postgres protocol message from Stream:
-%   [TypeByte, L3, L2, L1, L0, Body...]
-% where the int32(L3..L0) length includes itself but not the type byte.
+%% get_message_bytes(+Stream, -Bytes)
+%
+% Reads a single PostgreSQL protocol message from `Stream` as the byte list
+% `[TypeByte, L3, L2, L1, L0, Body...]`, where the `int32(L3..L0)` length
+% includes itself but not the type byte.
 get_message_bytes(Stream, Bytes) :-
     get_byte(Stream, BType),
     get_byte(Stream, B3),
@@ -129,7 +173,10 @@ put_bytes(Stream, [B|Bs]) :-
     put_byte(Stream, B),
     put_bytes(Stream, Bs).
 
-% A printable-ASCII nonce: 18 random bytes base64-encoded (24 chars, no '/').
+%% client_nonce_chars(-Nonce)
+%
+% A printable-ASCII nonce: 18 random bytes base64-encoded with the URL
+% charset and no padding (24 chars, no `/`).
 client_nonce_chars(Nonce) :-
     crypto_n_random_bytes(18, RandBytes),
     bytes_to_chars(RandBytes, RandChars),
@@ -142,20 +189,28 @@ bytes_to_chars([B|Bs], [C|Cs]) :- char_code(C, B), bytes_to_chars(Bs, Cs).
 chars_to_bytes([], []).
 chars_to_bytes([C|Cs], [B|Bs]) :- char_code(C, B), chars_to_bytes(Cs, Bs).
 
-% bytes_xor(+As, +Bs, -Cs): C[i] = A[i] xor B[i].
+%% bytes_xor(+As, +Bs, -Cs)
+%
+% Element-wise XOR of two byte lists of equal length: `C[i] = A[i] xor B[i]`.
 bytes_xor([], [], []).
 bytes_xor([A|As], [B|Bs], [C|Cs]) :-
     C is xor(A, B),
     bytes_xor(As, Bs, Cs).
 
-% sha256_bytes(+InputBytes, -OutputBytes): SHA-256 over bytes -> bytes.
+%% sha256_bytes(+InputBytes, -OutputBytes)
+%
+% SHA-256 over a byte list, returning the 32-byte digest as a byte list.
 sha256_bytes(InputBytes, OutputBytes) :-
     bytes_to_chars(InputBytes, InputChars),
     crypto_data_hash(InputChars, Hex, [algorithm(sha256), encoding(octet)]),
     hex_bytes(Hex, OutputBytes).
 
-% hmac_sha256(+KeyBytes, +DataChars, -MacBytes)
-% Data is taken as UTF-8 chars; with encoding(octet) we feed octet-chars.
+%% hmac_sha256(+KeyBytes, +Data, -MacBytes)
+%
+% HMAC-SHA-256 with key `KeyBytes` (a byte list) over `Data`. `Data` may be
+% either a list of chars or a list of bytes (0..255); byte input is converted
+% to octet-chars before being fed to `crypto_data_hash/3` with
+% `encoding(octet)`.
 hmac_sha256(KeyBytes, DataChars, MacBytes) :-
     (   data_is_bytes(DataChars)
     ->  bytes_to_chars(DataChars, OctetChars)
@@ -163,11 +218,18 @@ hmac_sha256(KeyBytes, DataChars, MacBytes) :-
     crypto_data_hash(OctetChars, Hex, [algorithm(sha256), hmac(KeyBytes), encoding(octet)]),
     hex_bytes(Hex, MacBytes).
 
-% Heuristic: if the head is an integer 0..255, treat as a byte list; otherwise chars.
+%% data_is_bytes(+List)
+%
+% Succeeds when `List` looks like a byte list: a non-empty list whose first
+% element is an integer in `0..255`. Used by `hmac_sha256/3` to decide whether
+% to convert input to octet-chars.
 data_is_bytes([H|_]) :- integer(H), H >= 0, H =< 255.
 
-% pbkdf2_hmac_sha256(+PasswordBytes, +SaltBytes, +Iterations, +DkLen, -DK)
-% RFC 8018. For our use, DkLen=32 (one block).
+%% pbkdf2_hmac_sha256(+PasswordBytes, +SaltBytes, +Iterations, +DkLen, -DK)
+%
+% PBKDF2 with HMAC-SHA-256 as the underlying PRF, per
+% [RFC 8018](https://www.rfc-editor.org/rfc/rfc8018). Only `DkLen = 32` (a
+% single output block) is supported, which is what SCRAM-SHA-256 requires.
 pbkdf2_hmac_sha256(Password, Salt, Iterations, 32, DK) :-
     int32_be_bytes(1, IndexBytes),
     append(Salt, IndexBytes, FirstBlockInput),
@@ -182,15 +244,21 @@ pbkdf2_iterate(Password, Prev, Acc, MaxIter, I, DK) :-
     I1 is I + 1,
     pbkdf2_iterate(Password, Next, Acc1, MaxIter, I1, DK).
 
-% Big-endian uint32 encoding.
+%% int32_be_bytes(+N, -Bytes)
+%
+% Encodes a 32-bit non-negative integer `N` as a big-endian 4-byte list.
 int32_be_bytes(N, [B3,B2,B1,B0]) :-
     B0 is N /\ 255,
     B1 is (N >> 8) /\ 255,
     B2 is (N >> 16) /\ 255,
     B3 is (N >> 24) /\ 255.
 
-% parse_server_first(+Chars, -CombinedNonce, -SaltBytes, -Iterations)
-% Format: "r=<nonce>,s=<base64-salt>,i=<iter>"  (the m= extension is ignored if present.)
+%% parse_server_first(+Chars, -CombinedNonce, -SaltBytes, -Iterations)
+%
+% Parses a server-first message of the form
+% `r=<nonce>,s=<base64-salt>,i=<iter>`, returning the combined nonce, the
+% decoded salt as bytes, and the iteration count as an integer. The optional
+% `m=` mandatory-extensions attribute is ignored if present.
 parse_server_first(Chars, Nonce, SaltBytes, Iterations) :-
     split_on(Chars, ',', Parts),
     member(NoncePart, Parts), append("r=", Nonce, NoncePart), !,
@@ -200,8 +268,11 @@ parse_server_first(Chars, Nonce, SaltBytes, Iterations) :-
     chars_to_bytes(SaltChars, SaltBytes),
     number_chars(Iterations, IterChars).
 
-% parse_server_final(+Chars, -ServerSigB64) when success.
-% Throws if server reported an error (e=<error>).
+%% parse_server_final(+Chars, -ServerSigB64)
+%
+% On success, extracts the `v=<base64-signature>` server signature from a
+% server-final message. Throws `scram_server_error(Err)` when the server
+% reported an `e=<error>` instead.
 parse_server_final(Chars, ServerSigB64) :-
     split_on(Chars, ',', Parts),
     (   member(EPart, Parts), append("e=", Err, EPart)
@@ -209,7 +280,11 @@ parse_server_final(Chars, ServerSigB64) :-
     ;   true ),
     member(VPart, Parts), append("v=", ServerSigB64, VPart), !.
 
-% split_on(+Chars, +SepChar, -Parts): split a char list on a given char.
+%% split_on(+Chars, +SepChar, -Parts)
+%
+% Splits the char list `Chars` on every occurrence of `SepChar`, producing
+% `Parts` as the list of separator-free segments (a trailing empty segment is
+% omitted because the base case returns the remainder as a single part).
 split_on(Chars, Sep, [Part|Rest]) :-
     append(Part, [Sep|Tail], Chars),
     \+ member(Sep, Part),
