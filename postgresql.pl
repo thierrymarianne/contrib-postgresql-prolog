@@ -7,9 +7,27 @@
 
 
 :- use_module(messages).
-:- use_module(scram, [do_scram_sha_256_after_offer/3]).
+% scram.pl pulls in library(crypto), whose eager load makes the Logtalk
+% test suite hang under Scryer 0.9.4 + Logtalk 3.70.0 (the pair this repo
+% pins for that job, since Scryer >= 0.10 dropped the Logtalk adapter).
+% Load scram lazily, but anchor its path at compile time so the resolution
+% does not depend on the consumer's runtime CWD (a regression we hit when
+% this package is vendored as a submodule -- see
+% tests/scram_handshake_cwd_independence_test.pl).
 :- use_module(sql_query).
 :- use_module(types).
+
+:- dynamic(scram_module_path/1).
+
+capture_scram_module_path :-
+    catch(
+        ( prolog_load_context(directory, Dir),
+          atom_concat(Dir, '/scram.pl', Path),
+          assertz(scram_module_path(Path)) ),
+        _,
+        true
+    ).
+:- initialization(capture_scram_module_path).
 
 connect(User, Password, Host, Port, Database, postgresql(Stream)) :-
     (   atom(Host)
@@ -34,8 +52,10 @@ handle_auth(password, Stream, _, Password) :-
     get_bytes(Stream, BytesOk),
     auth_ok_message(BytesOk).
 handle_auth(sasl(Mechanisms), Stream, User, Password) :-
+    scram_module_path(Path),
+    use_module(Path, [do_scram_sha_256_after_offer/3]),
     if_(memberd_t("SCRAM-SHA-256", Mechanisms),
-        ( do_scram_sha_256_after_offer(Stream, User, Password),
+        ( scram:do_scram_sha_256_after_offer(Stream, User, Password),
           get_bytes(Stream, BytesOk),
           auth_ok_message(BytesOk)
         ),
