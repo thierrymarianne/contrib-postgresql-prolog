@@ -4,6 +4,7 @@
 :- use_module(library(charsio)).
 :- use_module(library(sockets)).
 :- use_module(library(reif)).
+:- use_module(library(dif)).
 
 
 :- use_module(messages).
@@ -139,7 +140,7 @@ try_parse_response(Stream, BytesData, Params, Result) :-
     bind_message(Params, BindBytes),
     put_bytes(Stream, BindBytes),
     flush_message(FlushBytes),
-    put_bytes(Stream, FlushBytes),    
+    put_bytes(Stream, FlushBytes),
     get_bytes(Stream, ResponseBytes),
     try_bind_response(Stream, ResponseBytes, Result).
 
@@ -147,26 +148,55 @@ try_parse_response(Stream, BytesResponse, _, Result) :-
     error_message(Error, BytesResponse),!,
     Result = error(Error),
     sync_message(SyncBytes),
-    put_bytes(Stream, SyncBytes),    
+    put_bytes(Stream, SyncBytes),
     get_bytes(Stream, BytesEnd),
     ready_for_query_message(BytesEnd).
+
+% Skip transient NoticeResponse so it doesn't desync at the Parse step.
+try_parse_response(Stream, BytesResponse, Params, Result) :-
+    notice_message(BytesResponse),!,
+    get_bytes(Stream, BytesResponse0),
+    try_parse_response(Stream, BytesResponse0, Params, Result).
+
+% Surface anything else so the upstream caller doesn't silently fail.
+try_parse_response(_Stream, BytesResponse, _, _) :-
+    throw(wire_silent_failure(unexpected_parse_response(BytesResponse))).
 
 try_bind_response(Stream, BytesData, Result) :-
     bind_complete_message(BytesData),!,
     execute_message(ExecuteBytes),
     put_bytes(Stream, ExecuteBytes),
     flush_message(FlushBytes),
-    put_bytes(Stream, FlushBytes),    
+    put_bytes(Stream, FlushBytes),
     get_bytes(Stream, ResponseBytes),
     try_execute_response(Stream, ResponseBytes, Result).
-    
-try_bind_response(Stream, BytesResponse, _, Result) :-
+
+% Was previously declared at arity 4 -- unreachable from the arity-3
+% call site at try_parse_response/4, which made every server-side
+% error at the BIND step a silent failure of try_bind_response/3.
+% Surfacing the error here is what lets the count(*) dedup probe stop
+% being routed through pg_query_silently_failed/2 + record_skipped_post/3
+% and instead carry the labelled pg_error/1 the caller already handles.
+try_bind_response(Stream, BytesResponse, Result) :-
     error_message(Error, BytesResponse),!,
     Result = error(Error),
     sync_message(SyncBytes),
-    put_bytes(Stream, SyncBytes),    
+    put_bytes(Stream, SyncBytes),
     get_bytes(Stream, BytesEnd),
     ready_for_query_message(BytesEnd).
+
+% Skip transient NoticeResponse messages between Bind and BindComplete
+% so an informational notice doesn't desync the protocol.
+try_bind_response(Stream, BytesResponse, Result) :-
+    notice_message(BytesResponse),!,
+    get_bytes(Stream, BytesResponse0),
+    try_bind_response(Stream, BytesResponse0, Result).
+
+% Anything else at this step is an unexpected message shape -- surface
+% it rather than fail silently so the upstream caller (pg_query_or_throw)
+% records it via record_pg_query_failure/3 with reason(thrown(...)).
+try_bind_response(_Stream, BytesResponse, _Result) :-
+    throw(wire_silent_failure(unexpected_bind_response(BytesResponse))).
 
 try_execute_response(Stream, BytesResponse, Result) :-
     ext_get_data_rows(Stream, ColumnsData, BytesResponse),
@@ -181,8 +211,22 @@ try_execute_response(Stream, BytesResponse, Result) :-
 try_execute_response(Stream, BytesResponse, Result) :-
     error_message(Error, BytesResponse),!,
     Result = error(Error),
+    sync_message(SyncBytes),
+    put_bytes(Stream, SyncBytes),
     get_bytes(Stream, BytesEnd),
     ready_for_query_message(BytesEnd).
+
+% Skip transient NoticeResponse so it doesn't desync at the Execute step.
+try_execute_response(Stream, BytesResponse, Result) :-
+    notice_message(BytesResponse),!,
+    get_bytes(Stream, BytesResponse0),
+    try_execute_response(Stream, BytesResponse0, Result).
+
+% Catch-all so anything else surfaces as a labelled throw rather than
+% making the whole query/4 chain fail silently and route through
+% pg_query_silently_failed/2 + record_skipped_post/3.
+try_execute_response(_Stream, BytesResponse, _Result) :-
+    throw(wire_silent_failure(unexpected_execute_response(BytesResponse))).
 
 ext_get_data_rows(Stream, [], BytesData) :-
     command_complete_message(BytesData),!,
@@ -199,8 +243,20 @@ ext_get_data_rows(Stream, [Column|Columns], BytesData) :-
 
 % https://www.postgresql.org/docs/current/protocol-flow.html#id-1.10.5.7.3
 
+% Read one Postgres wire-protocol message. The dispatch on the
+% first byte's value via continue_get_bytes/3 makes EOF a labelled
+% throw rather than an int32/2 failure that silently kills the
+% caller. Without this, get_byte/2's end_of_file atom flows into
+% the int32 decoder, fails, and unwinds all the way to
+% pg_query_or_throw's silent branch.
 get_bytes(Stream, Bytes) :-
     get_byte(Stream, BType),
+    continue_get_bytes(BType, Stream, Bytes).
+
+continue_get_bytes(end_of_file, _Stream, _Bytes) :-
+    throw(wire_silent_failure(stream_eof)).
+continue_get_bytes(BType, Stream, Bytes) :-
+    dif(BType, end_of_file),
     get_byte(Stream, B3),
     get_byte(Stream, B2),
     get_byte(Stream, B1),
@@ -208,11 +264,11 @@ get_bytes(Stream, Bytes) :-
     int32(Length, [B3, B2, B1, B0]),
     RemainingBytes is Length - 4,
     get_bytes(Stream, RemainingBytes, Bytes0),
-    append([BType, B3, B2, B1, B0], Bytes0, Bytes),
-    !.
+    append([BType, B3, B2, B1, B0], Bytes0, Bytes).
 
 get_bytes(_, 0, []).
 get_bytes(Stream, RemainingBytes, [B|Bytes]) :-
+    RemainingBytes > 0,
     get_byte(Stream, B),
     RemainingBytes1 is RemainingBytes - 1,
     get_bytes(Stream, RemainingBytes1, Bytes).
